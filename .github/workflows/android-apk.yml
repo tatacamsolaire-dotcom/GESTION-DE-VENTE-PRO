@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build Android APK (diagnostic)
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Java 17 (Gradle 8+ compatible)
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -25,16 +25,35 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Flutter doctor (debug)
-        run: flutter doctor -v
+      - name: Versions (debug)
+        run: |
+          flutter --version
+          java -version
+          echo "=== pubspec.yaml ==="
+          sed -n '1,120p' pubspec.yaml || true
 
       - name: Get packages
         run: flutter pub get
 
-      # Optionnel mais utile pour voir les erreurs réelles
-      - name: Build APK (debug, verbeux)
-        run: flutter build apk --debug -v
+      - name: Clean (fresh build)
+        run: flutter clean
 
+      # 1) Tentative Flutter (verbose) en capturant TOUT le log
+      - name: Build APK via Flutter (debug, verbose)
+        id: flutter_build
+        run: |
+          set -o pipefail
+          flutter build apk --debug -v 2>&1 | tee flutter_build_log.txt
+
+      # 2) Si ça échoue, on force un build Gradle avec stacktrace/info pour voir la vraie cause
+      - name: Build via Gradle (assembleDebug, stacktrace)
+        if: always()   # on l'exécute même si l'étape précédente a échoué
+        run: |
+          cd android
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --stacktrace --info 2>&1 | tee ../gradle_build_log.txt
+
+      # APKs si ça a réussi
       - name: Upload debug APK
         if: success()
         uses: actions/upload-artifact@v4
@@ -42,13 +61,23 @@ jobs:
           name: app-debug
           path: build/app/outputs/flutter-apk/app-debug.apk
 
-      # Si tu veux aussi un APK release non signé (facile à tester)
-      - name: Build APK (release, non-signed)
-        run: flutter build apk --release -v
+      # Toujours uploader les logs + fichiers de config Android pour diagnostic
+      - name: Collect Android files
+        if: always()
+        run: |
+          mkdir -p diag/android
+          cp -f pubspec.yaml diag/ || true
+          cp -f android/gradle.properties diag/android/ || true
+          cp -f android/build.gradle diag/android/ || true
+          cp -f android/app/build.gradle diag/android/ || true
+          cp -f android/gradle/wrapper/gradle-wrapper.properties diag/android/ || true
+          cp -f android/app/src/main/AndroidManifest.xml diag/android/ || true
+          cp -f flutter_build_log.txt diag/ || true
+          cp -f gradle_build_log.txt diag/ || true
 
-      - name: Upload release APK
-        if: success()
+      - name: Upload diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-unsigned
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: build-diagnostics
+          path: diag/**
